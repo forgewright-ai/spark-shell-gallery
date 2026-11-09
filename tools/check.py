@@ -259,6 +259,8 @@ def walk():
     """-> the index lines, after every check; ValueError at the first finding."""
     for top, dirs, files in os.walk(ROOT):
         dirs[:] = [x for x in dirs if x != ".git"]
+        if top == ROOT:   # a worktree's .git is a file naming its repository (REVIEW.md checks one): git's, not the gallery's
+            files = [x for x in files if x != ".git"]
         for x in dirs + files:
             p = os.path.join(top, x)
             rel = os.path.relpath(p, ROOT)
