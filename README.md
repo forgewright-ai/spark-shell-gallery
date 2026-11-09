@@ -42,7 +42,7 @@ A folder `themes/NAME` with two files and at most one picture:
   A shared theme never sets the text size, the pointer or a path on anyone's machine.
 - `palette.env`: the twenty colors, `THEME_BG`, `THEME_FG`, `THEME_ACCENT`, `THEME_MUTED`
   and `THEME_ANSI_0` to `THEME_ANSI_15`, each `#rrggbb` once. The text reads at 4.5 to 1
-  on the ground at least.
+  on the ground at least, the accent at 3 to 1.
 - A picture, when `look.env` says `WALLPAPER=picture`.
 
 ## A wallpaper
@@ -55,10 +55,12 @@ wallpapers, and none of spark-shell's own: its palettes, drawings and the words 
 
 ## Pictures
 
-A PNG or a JPEG, as its name says; 4 MiB at most and 7680x4320 at most; and no metadata.
-A photo can carry where and when it was taken, so EXIF, XMP and text chunks are refused:
-`exiftool -all= FILE` or `mogrify -strip FILE` removes them. It is your own work, or work
-you may share under this repository's license.
+A PNG or a JPEG, as its name says; 4 MiB at most and 7680x4320 at most; a still
+picture's own parts alone. A photo can carry where and when it was taken, so metadata
+(EXIF, XMP, text, C2PA), animation, private chunks and anything after the picture's end
+are refused: `exiftool -all= FILE` or `mogrify -strip FILE` removes them. A PNG is saved
+plain, not interlaced. It is your own work, or work you may share under this repository's
+license.
 
 ## Adding one
 
@@ -72,11 +74,14 @@ you may share under this repository's license.
 
 ## Review and releases
 
-Every pull request needs a green check (`tools/check.py`) and the owner's approval
-(`CODEOWNERS`). On request, a Claude Code session reviews it against
-[REVIEW.md](REVIEW.md) and comments; its review advises, and the owner decides. A release
-is a tag, `v1`, `v2` and on, signed with spark-shell's release key; `theme install` reads
-nothing else.
+Every pull request needs a green check and the owner's approval (`CODEOWNERS`). The check
+is main's `tools/check.py` run on the pull request's tree, so nothing of a pull request
+judges itself, and a contribution changes `themes/`, `wallpapers/` and `index.tsv` alone.
+On request, a Claude Code session reviews it against [REVIEW.md](REVIEW.md) and hands its
+review to the owner; it advises, and the owner decides. A release is a tag, `gallery-v1`,
+`gallery-v2` and on, whose message opens with `spark-shell-gallery gallery-vN`, signed
+with spark-shell's release key and made by the owner alone; `theme install` reads nothing
+else, and a spark-shell release is never taken for one.
 
 ## License
 

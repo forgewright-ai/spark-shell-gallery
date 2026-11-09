@@ -3,6 +3,9 @@
 
   python3 tools/check.py           check every theme and wallpaper, and that index.tsv names them as they are
   python3 tools/check.py --write   the same checks, then index.tsv written from the tree
+  python3 -I -B tools/check.py --root DIR
+                                   the same checks on another tree, such as a pull request's: main's check
+                                   judges it, so nothing of the pull request runs
 
 The gallery is data alone, as spark-shell's `theme install` reads it (format 1):
 
@@ -11,8 +14,9 @@ The gallery is data alone, as spark-shell's `theme install` reads it (format 1):
   themes/NAME/PICTURE       at most one picture, when look.env says WALLPAPER=picture
   wallpapers/NAME.EXT       one picture
 
-A picture is a PNG or a JPEG as its name says, 4 MiB at most and 7680x4320 at most, with no
-metadata (no EXIF, XMP or text chunks: a photo can carry where it was taken). No SVG, GIF,
+A picture is a PNG or a JPEG as its name says, 4 MiB at most and 7680x4320 at most, of a still
+picture's own parts alone: no metadata (EXIF, XMP, text, C2PA: a photo can carry where it was
+taken), no animation, no private chunk, nothing after its end. No SVG, GIF,
 font or script, no link, nothing executable, and nothing outside themes/ and wallpapers/ but
 the repo's own files. spark-shell checks all of it again before it keeps anything.
 """
@@ -22,14 +26,15 @@ import re
 import stat
 import struct
 import sys
+import zlib
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # --root DIR checks another tree
 FORMAT_LINE = "# spark-shell gallery 1"
 PICTURE_MAX = 4194304
 PIXELS_MAX = (7680, 4320)
-NAME = re.compile(r"^[a-z][a-z0-9-]{0,39}$")
-PICTURE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*\.(png|jpg|jpeg)$")
-HEX = re.compile(r"^#[0-9a-fA-F]{6}$")
+NAME = re.compile(r"[a-z][a-z0-9-]{0,39}")   # every pattern is used with fullmatch: $ would match before a new line
+PICTURE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*\.(png|jpg|jpeg)")
+HEX = re.compile(r"#[0-9a-fA-F]{6}")
 
 # spark-shell's lists (v0.134): the curated faces, the glyph families, the dialog's animations, the drawings and scenes it
 # ships, its palettes, and the words of `spark-shell theme` -- a theme by one of those names could not be used by name
@@ -48,12 +53,12 @@ RESERVED = set(DRAWINGS) | set(PALETTES) | set(THEME_WORDS)
 THEME_KEYS = ["THEME_BG", "THEME_FG", "THEME_ACCENT", "THEME_MUTED"] + ["THEME_ANSI_%d" % i for i in range(16)]
 LOOK_KEYS = {
     "FORMAT": lambda v: v == "2",
-    "PALETTE": lambda v: re.match(r"^[A-Za-z0-9._-]{1,40}$", v),
-    "WORDS": lambda v: re.match(r"^[A-Za-z0-9 ,.-]{0,80}$", v),
-    "WALLPAPER": lambda v: v in ("default", "picture") or HEX.match(v) or v in DRAWINGS,
-    "PICTURE": lambda v: PICTURE_NAME.match(v),
+    "PALETTE": lambda v: re.fullmatch(r"[A-Za-z0-9._-]{1,40}", v),
+    "WORDS": lambda v: re.fullmatch(r"[A-Za-z0-9 ,.-]{0,80}", v),
+    "WALLPAPER": lambda v: v in ("default", "picture") or HEX.fullmatch(v) or v in DRAWINGS,
+    "PICTURE": lambda v: PICTURE_NAME.fullmatch(v),
     "FACE": lambda v: v in FACES,
-    "ALPHA": lambda v: re.match(r"^(1|1\.0|0\.[5-9][0-9]?)$", v),
+    "ALPHA": lambda v: re.fullmatch(r"1|1\.0|0\.[5-9][0-9]?", v),
     "ANIMATION": lambda v: v in ANIMATIONS,
     "GLYPH_FAMILY": lambda v: v in FAMILIES,
     "BAR_GLYPHS": lambda v: v in ("signs", "words"),
@@ -61,54 +66,77 @@ LOOK_KEYS = {
     "DIALOG_ICONS": lambda v: v in ("on", "off"),
     "DIALOG_SPACING": lambda v: v in ("none", "groups", "rows"),
 }
-REPO_FILES = {"README.md", "REVIEW.md", "LICENSE", "index.tsv", ".gitignore", "tools/check.py",
+REPO_FILES = {"README.md", "REVIEW.md", "LICENSE", "index.tsv", ".gitignore", "tools/check.py", ".github/dependabot.yml",
               ".github/CODEOWNERS", ".github/workflows/check.yml", ".github/pull_request_template.md"}
 
 
+JPEG_SOF = {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}
+PNG_CHUNKS = {b"IHDR", b"PLTE", b"tRNS", b"gAMA", b"cHRM", b"sRGB", b"pHYs", b"bKGD", b"IDAT", b"IEND"}
+JPEG_MARKERS = JPEG_SOF | {0xD8, 0xE0, 0xDB, 0xC4, 0xDD, 0xDA, 0xD9} | set(range(0xD0, 0xD8))
+
+
 def picture(path):
-    """-> (kind, width, height) from the header; ValueError for anything that is not a plain PNG or JPEG, or carries metadata."""
+    """-> (kind, width, height): a PNG of a still picture's chunks alone, IHDR first and IEND last; a JPEG of
+    a still picture's markers alone, read through its scans to EOI at its end; ValueError for anything else.
+    spark-shell's lib/look.py picture holds the same lists."""
     data = open(path, "rb").read()
     if data[:8] == b"\x89PNG\r\n\x1a\n":
-        pos, w = 8, None
-        while pos + 8 <= len(data):
+        pos, size = 8, None
+        while pos + 12 <= len(data):
             n, = struct.unpack(">I", data[pos:pos + 4])
             kind = data[pos + 4:pos + 8]
+            if kind not in PNG_CHUNKS:
+                raise ValueError("a PNG with a %r chunk, which a still picture has not: strip it" % kind.decode("latin-1"))
             if pos == 8:
-                if kind != b"IHDR":
+                if kind != b"IHDR" or n != 13:
                     raise ValueError("a PNG whose first chunk is not its header")
-                w, h = struct.unpack(">II", data[pos + 8:pos + 16])
-            if kind in (b"eXIf", b"tEXt", b"zTXt", b"iTXt", b"tIME"):
-                raise ValueError("a PNG with metadata (%s): strip it" % kind.decode("latin-1"))
+                size = struct.unpack(">II", data[16:24])
             if kind == b"IEND":
                 if pos + 12 != len(data):
                     raise ValueError("a PNG with data after its end")
-                return "png", w, h
+                return "png", size[0], size[1]
             pos += 12 + n
         raise ValueError("a PNG with no end")
     if data[:3] == b"\xff\xd8\xff":
         pos, size = 2, None
-        while pos + 4 <= len(data):
+        while pos + 2 <= len(data):
             if data[pos] != 0xFF:
                 raise ValueError("a JPEG with a broken marker")
             m = data[pos + 1]
             if m == 0xFF:
                 pos += 1
                 continue
-            if m in (0xD8, 0x01) or 0xD0 <= m <= 0xD7:
-                pos += 2
-                continue
-            n, = struct.unpack(">H", data[pos + 2:pos + 4])
-            if m == 0xE1 or m == 0xED or m == 0xFE:
-                raise ValueError("a JPEG with metadata (EXIF, XMP, IPTC or a comment): strip it")
-            if m in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF) and size is None:
-                h, w = struct.unpack(">HH", data[pos + 5:pos + 9])
-                size = (w, h)
-            if m == 0xDA:
+            if m not in JPEG_MARKERS:
+                raise ValueError("a JPEG with a 0x%02X marker (metadata or more than a still picture): strip it" % m)
+            if m == 0xD9:
+                if pos + 2 != len(data):
+                    raise ValueError("a JPEG with data after its end")
                 if size is None:
                     raise ValueError("a JPEG with no frame header")
                 return "jpeg", size[0], size[1]
+            if m == 0xD8 or 0xD0 <= m <= 0xD7:
+                pos += 2
+                continue
+            if pos + 4 > len(data):
+                break
+            n, = struct.unpack(">H", data[pos + 2:pos + 4])
+            if m in JPEG_SOF and size is None:
+                if pos + 9 > len(data):
+                    break
+                h, w = struct.unpack(">HH", data[pos + 5:pos + 9])
+                size = (w, h)
             pos += 2 + n
-        raise ValueError("a JPEG with no scan")
+            if m == 0xDA:   # the scan's coded bytes, to the next marker: FF 00 is a byte, FF D0 to D7 a restart
+                while True:
+                    pos = data.find(b"\xff", pos)
+                    if pos < 0 or pos + 1 >= len(data):
+                        raise ValueError("a JPEG with no end")
+                    nx = data[pos + 1]
+                    if nx == 0x00 or nx == 0xFF or 0xD0 <= nx <= 0xD7:
+                        pos += 1
+                        continue
+                    break
+        raise ValueError("a JPEG with no end")
     raise ValueError("not a PNG or a JPEG")
 
 
@@ -138,11 +166,37 @@ def keyvals(path, what):
             continue
         if any(ord(ch) < 32 or ord(ch) == 127 for ch in line):
             raise ValueError("%s line %d holds a control character" % (what, i))
-        m = re.match(r"^([A-Z_0-9]+)=(.*)$", line)
+        m = re.fullmatch(r"([A-Z_0-9]+)=(.*)", line)
         if not m:
             raise ValueError("%s line %d is not KEY=value" % (what, i))
         out.append((m.group(1), m.group(2)))
     return out
+
+
+def png_inflates_as_said(path):
+    """ValueError unless a PNG's pixels inflate to exactly the bytes its header says: counted as they
+    stream, never kept, so a small file that would grow to gigabytes is refused, not decoded."""
+    data = open(path, "rb").read()
+    w, h, depth, ctype, _, _, interlace = struct.unpack(">IIBBBBB", data[16:29])
+    if interlace:
+        raise ValueError("an interlaced PNG: save it plain")
+    channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(ctype)
+    if channels is None or depth not in (1, 2, 4, 8, 16):
+        raise ValueError("a PNG of a color type or depth no picture has")
+    need = h * (1 + (w * channels * depth + 7) // 8)
+    z, got, pos = zlib.decompressobj(), 0, 8
+    while pos + 12 <= len(data):
+        n, = struct.unpack(">I", data[pos:pos + 4])
+        if data[pos + 4:pos + 8] == b"IDAT":
+            buf = data[pos + 8:pos + 8 + n]
+            while buf:
+                got += len(z.decompress(buf, 1 << 20))
+                if got > need:
+                    raise ValueError("a PNG that holds more than its header says")
+                buf = z.unconsumed_tail
+        pos += 12 + n
+    if got != need:
+        raise ValueError("a PNG whose pixels are not the ones its header says")
 
 
 def check_picture(path, what):
@@ -150,6 +204,11 @@ def check_picture(path, what):
     if st.st_size > PICTURE_MAX:
         raise ValueError("%s is over 4 MiB" % what)
     kind, w, h = picture(path)
+    if kind == "png":
+        try:
+            png_inflates_as_said(path)
+        except (ValueError, zlib.error, struct.error) as e:
+            raise ValueError("%s: %s" % (what, e))
     ext = path.rsplit(".", 1)[-1].lower()
     if {"png": "png", "jpg": "jpeg", "jpeg": "jpeg"}.get(ext) != kind:
         raise ValueError("%s is a %s named .%s" % (what, kind, ext))
@@ -173,13 +232,15 @@ def check_theme(name):
         raise ValueError("themes/%s/look.env is not FORMAT=2" % name)
     pal = dict()
     for k, v in keyvals(os.path.join(d, "palette.env"), "themes/%s/palette.env" % name):
-        if k not in THEME_KEYS or not HEX.match(v) or k in pal:
+        if k not in THEME_KEYS or not HEX.fullmatch(v) or k in pal:
             raise ValueError("themes/%s/palette.env: %s=%s is not one of the twenty colors, #rrggbb, once" % (name, k, v))
         pal[k] = v
     if len(pal) != len(THEME_KEYS):
         raise ValueError("themes/%s/palette.env has %d of the twenty colors" % (name, len(pal)))
     if contrast(pal["THEME_FG"], pal["THEME_BG"]) < 4.5:
         raise ValueError("themes/%s: the text on the ground is %.1f to 1, under 4.5 (WCAG AA)" % (name, contrast(pal["THEME_FG"], pal["THEME_BG"])))
+    if contrast(pal["THEME_ACCENT"], pal["THEME_BG"]) < 3:
+        raise ValueError("themes/%s: the accent on the ground is %.1f to 1, under 3" % (name, contrast(pal["THEME_ACCENT"], pal["THEME_BG"])))
     files = set(os.listdir(d))
     pic = look.get("PICTURE")
     if look.get("WALLPAPER") == "picture":
@@ -215,7 +276,7 @@ def walk():
     lines, names = [], {}
     tdir = os.path.join(ROOT, "themes")
     for name in sorted(os.listdir(tdir)) if os.path.isdir(tdir) else []:
-        if not NAME.match(name) or name in RESERVED:
+        if not NAME.fullmatch(name) or name in RESERVED:
             raise ValueError("themes/%s: a name is lowercase letters, digits and -, 40 at most, and none of spark-shell's own" % name)
         if not os.path.isdir(os.path.join(tdir, name)):
             raise ValueError("themes/%s is not a folder" % name)
@@ -227,7 +288,7 @@ def walk():
     wdir = os.path.join(ROOT, "wallpapers")
     for f in sorted(os.listdir(wdir)) if os.path.isdir(wdir) else []:
         name, _, ext = f.rpartition(".")
-        if not PICTURE_NAME.match(f) or not NAME.match(name) or name in RESERVED:
+        if not PICTURE_NAME.fullmatch(f) or not NAME.fullmatch(name) or name in RESERVED:
             raise ValueError("wallpapers/%s: a wallpaper is NAME.png, NAME.jpg or NAME.jpeg, its name lowercase letters, digits and -, none of spark-shell's own" % f)
         if name in names:
             raise ValueError("wallpapers/%s: %s is a theme's name already" % (f, name))
@@ -242,6 +303,13 @@ def walk():
 
 
 def main(argv):
+    global ROOT
+    if "--root" in argv[1:]:
+        i = argv.index("--root")
+        if i + 1 >= len(argv):
+            print("check: --root takes a folder")
+            return 2
+        ROOT = os.path.abspath(argv[i + 1])
     try:
         index = walk()
     except (OSError, ValueError, struct.error) as e:

@@ -1,6 +1,8 @@
 # the gallery's check: every theme and wallpaper is data alone, as spark-shell's theme
-# install reads it, and index.tsv names the tree as it is. A pull request from a fork runs
-# it with a read-only token and no secret.
+# install reads it, and index.tsv names the tree as it is. On a pull request main's own
+# check.py judges the pull request's tree: nothing of the pull request runs, so a change to
+# tools/ or .github/ cannot pass its own check. A pull request from anyone but the owner
+# changes data alone. A fork's pull request runs with a read-only token and no secret.
 name: check
 on:
   push:
@@ -16,8 +18,28 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+      - name: main's tree, the check that judges
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
         with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          path: base
           persist-credentials: false
-      - name: the data check and the index
-        run: python3 tools/check.py
+      - name: the tree to judge
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+        with:
+          path: tree
+          fetch-depth: 0
+          persist-credentials: false
+      - name: the data check and the index, by main's check.py
+        run: python3 -I -B base/tools/check.py --root tree
+      - name: a pull request from anyone but the owner changes data alone
+        if: github.event_name == 'pull_request' && github.event.pull_request.user.login != 'wellingtongranja'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          outside=$(git -C tree diff --name-only "$BASE" HEAD -- . ':!themes/' ':!wallpapers/' ':!index.tsv')
+          if [ -n "$outside" ]; then
+            echo "check: a contribution changes themes/, wallpapers/ and index.tsv alone; this one changes:"
+            printf '%s\n' "$outside"
+            exit 1
+          fi
