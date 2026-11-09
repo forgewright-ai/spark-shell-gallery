@@ -56,14 +56,18 @@ A throwaway key signs a local release of the pull request's tree, and a copy of
 spark-shell whose `allowed-signers` names that key reads it, in a home, a runtime folder
 and a temporary folder of its own, all removed after. `env -i` with its own
 `XDG_RUNTIME_DIR` keeps the running desktop out: no sway, Wayland or session bus of the
-live session is reached.
+live session is reached. Applying a theme also writes root's files (the console's colors
+at boot, in `/etc/rc.local`): `SPARK_SHELL_ROOT` puts every such path under the scratch
+folder, and a `sudo` that runs the command as you refuses any that is not, so a machine
+whose sudo asks no password keeps its own.
 
     ssh-keygen -q -t ed25519 -N '' -C '' -f "$d/key"
     cp -R ~/.spark-shell "$d/ss"
     printf 'spark-shell-release namespaces="git" %s\n' "$(cut -d' ' -f1,2 "$d/key.pub")" > "$d/ss/allowed-signers"
     git -C "$d/pr" -c gpg.format=ssh -c user.signingkey="$d/key" tag -s -m 'spark-shell-gallery gallery-v999' gallery-v999
-    mkdir -p "$d/home/.config/spark-shell" "$d/run" "$d/tmp" && printf 'DESKTOP=sway\n' > "$d/home/.config/spark-shell/config"
-    env -i HOME="$d/home" PATH="$PATH" XDG_RUNTIME_DIR="$d/run" TMPDIR="$d/tmp" SPARK_SHELL_GALLERY_URL="$d/pr" sh "$d/ss/spark-shell" theme install NAME
+    mkdir -p "$d/home/.config/spark-shell" "$d/run" "$d/tmp" "$d/root" "$d/bin" && printf 'DESKTOP=sway\n' > "$d/home/.config/spark-shell/config"
+    printf '#!/bin/sh\nexec "$@"\n' > "$d/bin/sudo" && chmod +x "$d/bin/sudo"
+    env -i HOME="$d/home" PATH="$d/bin:$PATH" XDG_RUNTIME_DIR="$d/run" TMPDIR="$d/tmp" SPARK_SHELL_ROOT="$d/root" SPARK_SHELL_GALLERY_URL="$d/pr" sh "$d/ss/spark-shell" theme install NAME
     cat "$d/home/.config/spark-shell/themes/NAME/look.env"
     rm -rf "$d"
 
