@@ -1,0 +1,23 @@
+# the gallery's check: every theme and wallpaper is data alone, as spark-shell's theme
+# install reads it, and index.tsv names the tree as it is. A pull request from a fork runs
+# it with a read-only token and no secret.
+name: check
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+        with:
+          persist-credentials: false
+      - name: the data check and the index
+        run: python3 tools/check.py
